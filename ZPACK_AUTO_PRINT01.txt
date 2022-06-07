@@ -1,0 +1,1527 @@
+*&---------------------------------------------------------------------*
+*& Report  ZPACK_AUTO_PRINT01
+*&
+*&---------------------------------------------------------------------*
+*&  Prints labels for auto pack.
+*&
+*&  Data selection is copied from report ZREP_HULIST01.
+*&  In one smartform 4 different layouts are printed.
+*&  Differences in the layouts are managed by using simple logic with
+*&  structure ZPACK_AUTO01_C1.
+*&  User could choose data to be displayed on the screen, but not printed.
+*&---------------------------------------------------------------------*
+REPORT zpack_auto_print01.
+
+DATA: gv_dummy_cpno     TYPE zconf_other-i_zcust_pack_no.
+DATA: gv_dummy_e_exidv  TYPE zconf_other-i_exidv.
+DATA: gv_dummy_vstel    TYPE vekp-vstel.
+DATA: gv_dummy_vbeln    TYPE vepo-vbeln.
+data: mv10a TYPE STANDARD TABLE OF mv10a WITH HEADER LINE.
+
+
+SELECTION-SCREEN BEGIN OF BLOCK b03 WITH FRAME TITLE c_b03.
+SELECT-OPTIONS: so_cpno FOR gv_dummy_cpno.
+SELECT-OPTIONS: so_exidv FOR gv_dummy_e_exidv.
+PARAMETERS: p_vstel TYPE vekp-vstel OBLIGATORY.
+SELECT-OPTIONS: so_vbeln FOR gv_dummy_vbeln.
+SELECTION-SCREEN END OF BLOCK b03.
+
+SELECTION-SCREEN BEGIN OF BLOCK b02 WITH FRAME TITLE c_b02.
+PARAMETERS: p_pr01 TYPE flag RADIOBUTTON GROUP p01 USER-COMMAND dummy01. " schenker -  q
+PARAMETERS: p_pr02 TYPE flag RADIOBUTTON GROUP p01. " VDA  - list of single hus
+PARAMETERS: p_pr03 TYPE flag RADIOBUTTON GROUP p01. " gestamp - list of single hus
+PARAMETERS: p_pr04 TYPE flag RADIOBUTTON GROUP p01. " BMW  - list of single hus
+PARAMETERS: p_pr05 TYPE flag RADIOBUTTON GROUP p01. " BMW small label
+
+SELECTION-SCREEN BEGIN OF BLOCK b01 WITH FRAME.
+PARAMETERS: p_prd1 TYPE flag RADIOBUTTON GROUP bp2 MODIF ID b02. " delivery
+PARAMETERS: p_prd2 TYPE flag RADIOBUTTON GROUP bp2 MODIF ID b02. " sales order
+SELECTION-SCREEN END OF BLOCK b01.
+SELECTION-SCREEN END OF BLOCK b02.
+
+SELECTION-SCREEN BEGIN OF BLOCK b04 WITH FRAME TITLE c_b04.
+PARAMETERS: p_oscr TYPE flag AS CHECKBOX.
+SELECTION-SCREEN END OF BLOCK b04.
+
+
+TYPES: st_dpetxt TYPE zpack_auto01_p1. " Static texts
+TYPES: st_dpval TYPE zpack_auto01_d01. " Actual print data.
+TYPES: tt_data_print TYPE zpack_auto01_p1_t.
+
+TYPES: ty_print_type TYPE numc2.
+TYPES: ty_print_type2 TYPE numc2.
+CONSTANTS: c_print_type1_q   TYPE ty_print_type VALUE 1.
+CONSTANTS: c_print_type1_hu1 TYPE ty_print_type VALUE 2.
+CONSTANTS: c_print_type2_1 TYPE ty_print_type VALUE 1.
+CONSTANTS: c_print_type2_2 TYPE ty_print_type VALUE 2.
+
+DATA: go_alv TYPE REF TO cl_salv_table.
+
+DATA: gt_item_scr TYPE tt_data_print.
+
+AT SELECTION-SCREEN OUTPUT.
+  PERFORM layout_set.
+
+CLASS lcl_data_reader DEFINITION.
+  PUBLIC SECTION.
+    METHODS: input_set IMPORTING
+                         it_cpno  TYPE STANDARD TABLE
+                         it_exidv TYPE STANDARD TABLE
+                         it_vstel TYPE STANDARD TABLE
+                         it_vbeln TYPE STANDARD TABLE.
+    METHODS: do.
+    TYPES: st_item TYPE zpack_auto01.
+    TYPES: tt_item TYPE STANDARD TABLE OF st_item WITH DEFAULT KEY
+      WITH NON-UNIQUE SORTED KEY k1
+          COMPONENTS i_zcust_pack_no " needed for faster summarization in groups
+                     zhu " output result must be sorted by ZHU, so it is put here as a key
+      WITH NON-UNIQUE SORTED KEY k2
+          COMPONENTS lot i_zcust_pack_no.
+    DATA: mt_data TYPE tt_item.
+  PRIVATE SECTION.
+    TYPES: tr_exidv TYPE RANGE OF zconf_other-i_exidv.
+    DATA:
+      mt_cpno  TYPE RANGE OF zconf_other-i_zcust_pack_no,
+      mt_exidv TYPE RANGE OF zconf_other-i_exidv,
+      mt_vstel TYPE RANGE OF vekp-vstel,
+      mt_vbeln TYPE RANGE OF vepo-vbeln.
+
+    DATA: mt_zco TYPE STANDARD TABLE OF zconf_other.
+    DATA: mt_zhu TYPE RANGE OF zconf_other-zhu.
+
+    METHODS: sel01 EXCEPTIONS no_data.
+    METHODS: sel02.
+    METHODS: calc01.
+    METHODS: calc02.
+    METHODS: mod01.
+    METHODS: mod02.
+    METHODS: mod03.
+    CLASS-METHODS: unit_conversion IMPORTING iv_input TYPE p iv_unit_in TYPE msehi iv_unit_out TYPE msehi EXPORTING ev_output TYPE p EXCEPTIONS error.
+ENDCLASS.
+
+CLASS lcl_data_reader IMPLEMENTATION.
+  METHOD input_set.
+    mt_cpno   = it_cpno.
+    mt_exidv  = it_exidv.
+    mt_vstel  = it_vstel.
+    mt_vbeln  = it_vbeln.
+  ENDMETHOD.
+
+  METHOD do.
+    DATA: ls_zhu  LIKE LINE OF mt_zhu.
+    DATA: ls_exidv LIKE LINE OF mt_exidv.
+*    DATA: ltr_exidv_tmp TYPE tr_exidv.
+
+    DEFINE zhu_add.
+      clear ls_zhu.
+      MOVE-CORRESPONDING &1 to ls_zhu.
+      append ls_zhu to mt_zhu.
+    END-OF-DEFINITION.
+
+    LOOP AT mt_exidv INTO ls_exidv.
+      zhu_add ls_exidv.
+    ENDLOOP.
+
+    sel01( EXCEPTIONS OTHERS = 1 ).
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+    mod01( ).
+    sel02( ).
+    calc01( ).
+    calc02( ).
+    mod02( ).
+    mod03( ).
+  ENDMETHOD.
+
+  METHOD sel01.
+    DATA: lv_wc TYPE string.
+    DATA: lv_dh TYPE flag.
+
+    CLEAR mt_data.
+    SELECT k~vstel, k~exidv AS zhu, k~brgew, k~gewei, k~vhilm,
+           p~vemng, p~vemeh, p~venum, p~vepos, p~vbeln, p~posnr, p~sonum, p~zz_kdauf, p~matnr AS matnr_vepo,
+           zco~pcs_ok, zco~aufnr, zco~i_zcust_pack_no, zco~i_exidv, zco~zcard_no, zco~rueck, zco~rmzhl
+      INTO CORRESPONDING FIELDS OF TABLE @mt_data
+      FROM vekp AS k INNER JOIN vepo AS p
+      ON k~venum = p~venum
+      INNER JOIN zconf_other AS zco
+      ON k~exidv = zco~zhu
+        WHERE p~vbeln IN @mt_vbeln AND k~vstel IN @mt_vstel AND exidv IN @mt_zhu AND zco~i_zcust_pack_no IN @mt_cpno.
+    IF sy-subrc <> 0.
+      RAISE no_data.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD sel02.
+    FIELD-SYMBOLS: <ls_item> LIKE LINE OF mt_data.
+    DATA: lv_spras TYPE sy-langu.
+    DATA: lv_colour TYPE char10,
+          lv_length TYPE zlength.
+
+    lv_spras = sy-langu.
+    " Fill in additional fields.
+    LOOP AT mt_data ASSIGNING <ls_item>.
+      IF NOT <ls_item>-aufnr IS INITIAL.
+        SELECT matnr INTO <ls_item>-matnr FROM afpo UP TO 1 ROWS WHERE aufnr = <ls_item>-aufnr.
+          EXIT.
+        ENDSELECT.
+
+        CLEAR: lv_colour, lv_length.
+        CALL FUNCTION 'ZORDER_CHAR'
+          EXPORTING
+            aufnr  = <ls_item>-aufnr
+          IMPORTING
+            colour = lv_colour
+            length = lv_length.
+        <ls_item>-colour = lv_colour.
+        <ls_item>-length = lv_length.
+      ENDIF.
+
+      IF NOT <ls_item>-matnr IS INITIAL.
+        SELECT meins INTO <ls_item>-meins FROM mara UP TO 1 ROWS WHERE matnr = <ls_item>-matnr.
+          EXIT.
+        ENDSELECT.
+
+        SELECT maktx INTO <ls_item>-maktx FROM makt UP TO 1 ROWS WHERE matnr = <ls_item>-matnr AND spras = lv_spras.
+          EXIT.
+        ENDSELECT.
+
+        SELECT cust_pnum zlength INTO (<ls_item>-cust_pnum, <ls_item>-zlength)
+          FROM zbmw_material UP TO 1 ROWS WHERE matnr = <ls_item>-matnr.
+          EXIT.
+        ENDSELECT.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD calc01.
+    " For each item fill in zcard_no_c number.
+    " This is the zcard_no number with the biggest sum of pcs_ok for the corresp. i_zcust_pack_no.
+    FIELD-SYMBOLS: <ls_item> LIKE LINE OF mt_data.
+    TYPES: BEGIN OF st_b1,
+             i_zcust_pack_no TYPE st_item-i_zcust_pack_no,
+             zcard_no        TYPE st_item-zcard_no,
+             pcs_ok          TYPE st_item-pcs_ok,
+           END OF st_b1,
+           tts_b1 TYPE SORTED TABLE OF st_b1 WITH UNIQUE KEY i_zcust_pack_no zcard_no,
+           tts_b2 TYPE SORTED TABLE OF st_b1 WITH UNIQUE KEY i_zcust_pack_no.
+
+    DATA: lt_b1 TYPE tts_b1.
+    DATA: lt_b2 TYPE tts_b2.
+    DATA: ls_b1 LIKE LINE OF lt_b1.
+    FIELD-SYMBOLS: <ls_b1> LIKE LINE OF lt_b1.
+    DATA: lt_zpn TYPE SORTED TABLE OF st_item-i_zcust_pack_no WITH UNIQUE KEY table_line.
+
+    " Summarize quantity per i_zcust_pack_no and zcard_no
+    CLEAR lt_b1.
+    LOOP AT mt_data ASSIGNING <ls_item>.
+      CLEAR ls_b1.
+      MOVE-CORRESPONDING <ls_item> TO ls_b1.
+
+      READ TABLE lt_b1 ASSIGNING <ls_b1> WITH TABLE KEY i_zcust_pack_no = ls_b1-i_zcust_pack_no zcard_no = ls_b1-zcard_no.
+      IF sy-subrc = 0.
+        ADD ls_b1-pcs_ok TO <ls_b1>-pcs_ok.
+      ELSE.
+        INSERT ls_b1 INTO TABLE lt_b1.
+      ENDIF.
+    ENDLOOP.
+
+    " For each i_zcust_pack_no get the zcard_no with the biggest amount.
+    CLEAR lt_zpn.
+    LOOP AT lt_b1 ASSIGNING <ls_b1>.
+      INSERT <ls_b1>-i_zcust_pack_no INTO TABLE lt_zpn.
+    ENDLOOP.
+    CLEAR lt_b2.
+    LOOP AT lt_zpn INTO DATA(lv_zpn).
+      CLEAR ls_b1.
+      LOOP AT lt_b1 ASSIGNING <ls_b1> WHERE i_zcust_pack_no = lv_zpn.
+        IF ls_b1-pcs_ok < <ls_b1>-pcs_ok.
+          ls_b1 = <ls_b1>.
+        ENDIF.
+      ENDLOOP.
+      INSERT ls_b1 INTO TABLE lt_b2.
+    ENDLOOP.
+
+    " For each item fill in zcard_no which contains the card no with the biggest amount.
+    LOOP AT mt_data ASSIGNING <ls_item>.
+      READ TABLE lt_b2 ASSIGNING <ls_b1> WITH TABLE KEY i_zcust_pack_no = <ls_item>-i_zcust_pack_no.
+      IF sy-subrc = 0.
+        <ls_item>-zcard_no_c = <ls_b1>-zcard_no.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD calc02.
+    " Fill in lot number.
+    FIELD-SYMBOLS: <ls_item> LIKE LINE OF mt_data.
+    DATA: lv_batch TYPE zcard_furn_data-batch.
+
+    LOOP AT mt_data ASSIGNING <ls_item>.
+      SELECT batch INTO lv_batch FROM zcard_furn_data UP TO 1 ROWS WHERE zcard_no = <ls_item>-zcard_no_c.
+        EXIT.
+      ENDSELECT.
+      IF sy-subrc = 0.
+        <ls_item>-lot = lv_batch.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD mod01.
+    " Removes items with storno.
+    FIELD-SYMBOLS: <ls_item> LIKE LINE OF mt_data.
+    DATA: lv_dummy_aufnr TYPE zafru-aufnr.
+    DATA: lv_index TYPE sy-tabix.
+
+    LOOP AT mt_data ASSIGNING <ls_item>.
+      lv_index = sy-tabix.
+      SELECT aufnr INTO lv_dummy_aufnr FROM zafru UP TO 1 ROWS WHERE rueck = <ls_item>-rueck AND rmzhl = <ls_item>-rmzhl AND aufnr = <ls_item>-aufnr.
+        EXIT.
+      ENDSELECT.
+      IF sy-subrc <> 0.
+        DELETE mt_data INDEX lv_index.
+        CONTINUE.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD mod02.
+    " Summarize items with the same ZHU.
+    FIELD-SYMBOLS: <ls_item> LIKE LINE OF mt_data.
+    DATA: ls_item_prev LIKE <ls_item>.
+    DATA: lt_data LIKE mt_data.
+
+    SORT mt_data BY zhu.
+    CLEAR ls_item_prev.
+    LOOP AT mt_data ASSIGNING <ls_item>.
+      IF sy-tabix = 1.
+        ls_item_prev = <ls_item>.
+        CONTINUE.
+      ENDIF.
+      IF ls_item_prev-zhu <> <ls_item>-zhu.
+        IF NOT ls_item_prev-zhu IS INITIAL.
+          APPEND ls_item_prev TO lt_data.
+          CLEAR ls_item_prev.
+          ls_item_prev = <ls_item>.
+          CONTINUE.
+        ENDIF.
+      ENDIF.
+
+      ADD <ls_item>-pcs_ok TO ls_item_prev-pcs_ok.
+    ENDLOOP.
+    IF NOT ls_item_prev-zhu IS INITIAL.
+      APPEND ls_item_prev TO lt_data.
+    ENDIF.
+
+    mt_data = lt_data.
+  ENDMETHOD.
+
+  METHOD mod03.
+    FIELD-SYMBOLS: <ls_item> LIKE LINE OF mt_data.
+    DATA: ls_item_ins LIKE LINE OF mt_data.
+    DATA: lt_k1 TYPE SORTED TABLE OF zconf_other-i_zcust_pack_no WITH UNIQUE KEY table_line.
+    DATA: lv_k1 LIKE LINE OF lt_k1.
+    DATA: lv_zhu_nr TYPE n LENGTH 20.
+    DATA: lv_zhu_min LIKE lv_zhu_nr.
+    DATA: lv_zhu_max LIKE lv_zhu_nr.
+    DATA: lv_t1 TYPE string.
+    DATA: lv_first TYPE flag.
+    DATA: lv_qty_tmp LIKE ls_item_ins-brgew.
+
+
+    CLEAR lt_k1.
+    LOOP AT mt_data ASSIGNING <ls_item>.
+      INSERT <ls_item>-i_zcust_pack_no INTO TABLE lt_k1.
+    ENDLOOP.
+
+    " For each i_zcust_pack_no find the lowest and the highest ZHU
+    " and summarize quantities.
+    " Add one item with summarized data.
+    LOOP AT lt_k1 INTO lv_k1.
+      CLEAR: ls_item_ins.
+      CLEAR: lv_zhu_min, lv_zhu_max.
+      lv_first = 'X'.
+      LOOP AT mt_data ASSIGNING <ls_item> USING KEY k1 WHERE i_zcust_pack_no = lv_k1.
+        CLEAR lv_zhu_nr.
+        lv_zhu_nr = <ls_item>-zhu+1(*).
+        IF NOT lv_zhu_nr IS INITIAL.
+          IF lv_zhu_min > lv_zhu_nr.
+            lv_zhu_min = lv_zhu_nr.
+          ENDIF.
+
+          IF lv_zhu_max < lv_zhu_nr.
+            lv_zhu_max = lv_zhu_nr.
+          ENDIF.
+        ENDIF.
+        IF NOT lv_first IS INITIAL.
+          CLEAR lv_first.
+          ls_item_ins = <ls_item>.
+          lv_zhu_min = lv_zhu_nr.
+          CONTINUE.
+        ENDIF.
+
+        " Summarize brgew.
+        CLEAR lv_qty_tmp.
+        unit_conversion( EXPORTING iv_input = <ls_item>-brgew iv_unit_in = <ls_item>-gewei iv_unit_out = ls_item_ins-gewei
+                         IMPORTING ev_output = lv_qty_tmp EXCEPTIONS OTHERS = 1 ).
+        IF sy-subrc = 0.
+          ls_item_ins-brgew = ls_item_ins-brgew + lv_qty_tmp.
+        ENDIF.
+
+        " Summarize vemng.
+        CLEAR lv_qty_tmp.
+        unit_conversion( EXPORTING iv_input = <ls_item>-vemng iv_unit_in = <ls_item>-vemeh iv_unit_out = ls_item_ins-vemeh
+                         IMPORTING ev_output = lv_qty_tmp EXCEPTIONS OTHERS = 1 ).
+        IF sy-subrc = 0.
+          ls_item_ins-vemng = ls_item_ins-vemng + lv_qty_tmp.
+        ENDIF.
+
+        ls_item_ins-pcs_ok = ls_item_ins-pcs_ok + <ls_item>-pcs_ok.
+      ENDLOOP.
+      lv_t1 = lv_zhu_min.
+      SHIFT lv_t1 LEFT DELETING LEADING '0'.
+      ls_item_ins-zhu = lv_t1.
+      " Use the last 3 digits from the max value.
+      CONCATENATE ls_item_ins-zhu lv_zhu_max+17(3) INTO ls_item_ins-zhu SEPARATED BY '-'.
+
+      ls_item_ins-item_sum = 'X'. " summary item
+      APPEND ls_item_ins TO mt_data.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD unit_conversion.
+    DATA: lv_unit_in  TYPE t006-msehi,
+          lv_unit_out TYPE t006-msehi.
+
+    CLEAR ev_output.
+    IF iv_unit_in = iv_unit_out.
+      ev_output = iv_input.
+      RETURN.
+    ENDIF.
+    lv_unit_in  = iv_unit_in.
+    lv_unit_out = iv_unit_out.
+    CALL FUNCTION 'UNIT_CONVERSION_SIMPLE'
+      EXPORTING
+        input                = iv_input
+*       NO_TYPE_CHECK        = 'X'
+*       ROUND_SIGN           = ' '
+        unit_in              = lv_unit_in
+        unit_out             = lv_unit_out
+      IMPORTING
+*       ADD_CONST            =
+*       DECIMALS             =
+*       DENOMINATOR          =
+*       NUMERATOR            =
+        output               = ev_output
+      EXCEPTIONS
+        conversion_not_found = 1
+        division_by_zero     = 2
+        input_invalid        = 3
+        output_invalid       = 4
+        overflow             = 5
+        type_invalid         = 6
+        units_missing        = 7
+        unit_in_not_found    = 8
+        unit_out_not_found   = 9
+        OTHERS               = 10.
+    IF sy-subrc <> 0.
+      CLEAR ev_output.
+      RAISE error.
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.
+
+INITIALIZATION.
+  c_b02 = 'Label selection'(t01).
+  c_b03 = 'Data selection for printing'(t02).
+  c_b04 = 'Output control'(t03).
+
+START-OF-SELECTION.
+
+  PERFORM input_check.
+  CHECK sy-subrc = 0.
+  PERFORM start.
+
+
+
+
+
+FORM input_check.
+  DATA: lv_error TYPE flag.
+
+  IF so_cpno[] IS INITIAL AND
+     so_exidv[] IS INITIAL AND
+     p_vstel IS INITIAL AND
+     so_vbeln[] IS INITIAL.
+    lv_error = 'X'.
+    WRITE:/ 'Please enter at least one selection criteria.'.
+  ENDIF.
+
+  IF lv_error IS INITIAL.
+    sy-subrc = 0.
+    RETURN.
+  ELSE.
+    sy-subrc = 4.
+    RETURN.
+  ENDIF.
+ENDFORM.
+
+CLASS lcl_api01 DEFINITION.
+  PUBLIC SECTION.
+    " According to material and delivery number get number of unique HUs used in a packing.
+    " Use buffering.
+    CLASS-METHODS: get_hu_count IMPORTING iv_matnr TYPE matnr iv_vbeln TYPE vbeln_vl EXPORTING ev_hu_count TYPE i.
+    CLASS-METHODS: matnr_data_get IMPORTING iv_matnr TYPE matnr EXPORTING ev_maktx TYPE maktx.
+    " Get sales order number and position by delivery item number.
+    CLASS-METHODS: so_get_by_delivery IMPORTING iv_vbeln TYPE lips-vbeln iv_posnr TYPE lips-posnr EXPORTING ev_vbeln TYPE vbap-vbeln ev_posnr TYPE vbap-posnr.
+    CLASS-METHODS: so_partner_get IMPORTING iv_vbeln TYPE vbak-vbeln iv_parvw TYPE parvw EXPORTING ev_kunnr TYPE kunnr es_vbpa TYPE vbpa es_mv10a TYPE mv10a.
+
+  PRIVATE SECTION.
+    TYPES: BEGIN OF st_hucnt,
+             matnr TYPE matnr,
+             vbeln TYPE vbeln_vl,
+             cnt   TYPE i,
+           END OF st_hucnt.
+    TYPES: tts_hucnt TYPE SORTED TABLE OF st_hucnt WITH UNIQUE KEY matnr vbeln.
+    CLASS-DATA: mt_hucnt TYPE tts_hucnt.
+
+ENDCLASS.
+
+CLASS lcl_api01 IMPLEMENTATION.
+
+  METHOD get_hu_count.
+    DATA: lt_exidv TYPE STANDARD TABLE OF vekp-exidv WITH EMPTY KEY.
+
+    CLEAR ev_hu_count.
+    CHECK NOT iv_matnr IS INITIAL AND NOT iv_vbeln IS INITIAL.
+
+    READ TABLE mt_hucnt ASSIGNING FIELD-SYMBOL(<ls_item>) WITH TABLE KEY matnr = iv_matnr vbeln = iv_vbeln.
+    IF sy-subrc = 0.
+      ev_hu_count = <ls_item>-cnt.
+      RETURN.
+    ENDIF.
+
+    CLEAR lt_exidv.
+    SELECT exidv INTO TABLE lt_exidv FROM vekp WHERE venum IN (
+    SELECT venum FROM vepo WHERE matnr = iv_matnr AND vbeln = iv_vbeln ).
+
+    SORT lt_exidv BY table_line.
+    DELETE ADJACENT DUPLICATES FROM lt_exidv COMPARING table_line.
+    DESCRIBE TABLE lt_exidv LINES ev_hu_count.
+    INSERT VALUE #( matnr = iv_matnr vbeln = iv_vbeln cnt = ev_hu_count ) INTO TABLE mt_hucnt.
+  ENDMETHOD.
+
+  METHOD matnr_data_get.
+    CLEAR ev_maktx.
+    SELECT maktx INTO ev_maktx FROM makt UP TO 1 ROWS WHERE matnr = iv_matnr AND spras = sy-langu.
+    ENDSELECT.
+  ENDMETHOD.
+
+  METHOD so_get_by_delivery.
+    DATA: lv_vbelv TYPE vbfa-vbelv,
+          lv_posnv TYPE vbfa-posnv.
+
+    CLEAR: ev_vbeln, ev_posnr.
+
+    CLEAR: lv_vbelv, lv_posnv.
+    SELECT vbelv, posnv INTO (@lv_vbelv, @lv_posnv) FROM vbfa UP TO 1 ROWS WHERE vbeln = @iv_vbeln AND posnn = @iv_posnr AND vbtyp_n = 'J' AND vbtyp_v = 'C'.
+    ENDSELECT.
+    IF sy-subrc = 0.
+      ev_vbeln = lv_vbelv.
+      ev_posnr = lv_posnv.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD so_partner_get.
+
+    CLEAR: ev_kunnr, es_vbpa.
+    CHECK NOT iv_vbeln IS INITIAL.
+
+
+    IF es_vbpa IS SUPPLIED.
+      SELECT * INTO @es_vbpa FROM vbpa UP TO 1 ROWS WHERE vbeln = @iv_vbeln AND parvw = @iv_parvw.
+        EXIT.
+      ENDSELECT.
+      IF sy-subrc = 0.
+        ev_kunnr = es_vbpa-kunnr.
+      ENDIF.
+    ELSE.
+      SELECT kunnr INTO @ev_kunnr FROM vbpa UP TO 1 ROWS WHERE vbeln = @iv_vbeln AND parvw = @iv_parvw.
+        EXIT.
+      ENDSELECT.
+    ENDIF.
+
+
+
+
+
+
+
+
+  ENDMETHOD.
+ENDCLASS.
+* Supplies actual data and texts for printing.
+CLASS lcl_print_data_loader DEFINITION ABSTRACT.
+  PUBLIC SECTION.
+    TYPES: ty_flag_p1 TYPE numc1. " printing Q or HU
+    TYPES: ty_flag_p2 TYPE numc1. " printing Delivery or Sales order.
+
+    METHODS: data_set
+      IMPORTING
+        is_item TYPE lcl_data_reader=>st_item
+*        iv_p1   TYPE ty_flag_p1
+        iv_p2   TYPE ty_flag_p2 OPTIONAL.
+    METHODS: do.
+    METHODS: print_data_get EXPORTING es_data TYPE st_dpval.
+    METHODS: form_text_get  EXPORTING es_text TYPE st_dpetxt.
+
+    CONSTANTS: c_print_hu TYPE ty_flag_p1 VALUE 1.
+    CONSTANTS: c_print_q  TYPE ty_flag_p1 VALUE 2.
+    CONSTANTS: c_doc_print_dlv TYPE ty_flag_p2 VALUE 1.
+    CONSTANTS: c_doc_print_so  TYPE ty_flag_p2 VALUE 2.
+  PROTECTED SECTION.
+    DATA: ms_item TYPE lcl_data_reader=>st_item.
+    DATA: mv_p1 TYPE ty_flag_p1.
+    DATA: mv_p2 TYPE ty_flag_p2.
+    DATA: ms_data_raw LIKE ms_item.
+    DATA: ms_dp1    TYPE st_dpval. "form actual values + additions for display to screen.
+    DATA: ms_ftext1 TYPE st_dpetxt. " form text descriptions
+
+    DATA: ms_likp       TYPE likp,
+          mv_lips_vtweg TYPE vtweg.
+
+    METHODS: data_sel1.
+    METHODS: data_fill ABSTRACT.
+    CLASS-METHODS: knmt_read_single IMPORTING iv_matnr TYPE matnr iv_vtweg TYPE vtweg iv_vkorg TYPE vkorg
+                                              iv_kunnr TYPE kunnr
+*      iv_werks TYPE werks_d
+                                    EXPORTING es_knmt  TYPE knmt.
+ENDCLASS.
+
+CLASS lcl_print_data_loader IMPLEMENTATION.
+  METHOD data_set.
+    ms_item = is_item.
+*    mv_p1   = iv_p1.
+    mv_p2   = iv_p2.
+  ENDMETHOD.
+
+  METHOD print_data_get.
+    es_data = ms_dp1.
+  ENDMETHOD.
+
+  METHOD form_text_get.
+    es_text = ms_ftext1.
+  ENDMETHOD.
+
+  METHOD do.
+    CLEAR ms_dp1.
+    data_sel1( ).
+    IF ms_data_raw IS INITIAL.
+      RETURN.
+    ENDIF.
+    data_fill( ).
+  ENDMETHOD.
+
+  METHOD data_sel1.
+    CLEAR ms_data_raw.
+    ms_data_raw = ms_item.
+*    CASE mv_p1.
+*      WHEN c_print_hu.
+*        LOOP AT mt_item INTO ms_data_raw WHERE item_sum IS INITIAL.
+*          EXIT.
+*        ENDLOOP.
+*      WHEN c_print_q.
+*        LOOP AT mt_item INTO ms_data_raw WHERE NOT item_sum IS INITIAL.
+*          EXIT.
+*        ENDLOOP.
+*      WHEN OTHERS.
+*        RETURN.
+*    ENDCASE.
+  ENDMETHOD.
+
+  METHOD knmt_read_single.
+    CLEAR es_knmt.
+    CHECK NOT iv_matnr IS INITIAL.
+
+    SELECT * INTO es_knmt FROM knmt
+      WHERE vkorg = iv_vkorg AND vtweg = iv_vtweg AND matnr = iv_matnr AND kunnr = iv_kunnr.
+      IF NOT es_knmt-postx IS INITIAL.
+        EXIT.
+      ENDIF.
+    ENDSELECT.
+  ENDMETHOD.
+ENDCLASS.
+
+DEFINE data_to_text_out.
+  write &2 to lv_t1.
+  SHIFT lv_t1 LEFT DELETING LEADING space.
+  &1 = lv_t1.
+END-OF-DEFINITION.
+
+* Supplies print data for Schenker.
+* Printing summarized data for the whole Q with quantity and weight summarization.
+CLASS lcl_print_data_loader01 DEFINITION INHERITING FROM lcl_print_data_loader.
+  PROTECTED SECTION.
+    METHODS: data_fill REDEFINITION.
+    METHODS: delivery_info_get.
+    METHODS: form_text_fill.
+
+    DATA: mv_zprnum TYPE mara-zprnum.
+ENDCLASS.
+
+CLASS lcl_print_data_loader01 IMPLEMENTATION.
+  METHOD data_fill.
+    DATA: lv_t1 TYPE c LENGTH 50.
+
+
+    DATA: lv_ferth TYPE mara-ferth.
+    DATA: lv_vtweg TYPE vtweg.
+    DATA: ls_knmt TYPE knmt.
+    DATA: lv_postx_main TYPE knmt-postx.
+    DATA: lv_postx_pack TYPE knmt-postx.
+    DATA: ls_ecust TYPE zecust01.
+    DATA: lv_sortl TYPE knmt-postx.
+
+
+    CLEAR ms_dp1.
+    ms_dp1-info-matnr = ms_data_raw-matnr_vepo.
+    lcl_api01=>matnr_data_get( EXPORTING iv_matnr = ms_dp1-matnr IMPORTING ev_maktx = ms_dp1-info-maktx ).
+    ms_dp1-info-zcard_no = ms_data_raw-zcard_no_c.
+
+    delivery_info_get( ).
+
+    CLEAR: mv_zprnum, lv_ferth.
+    IF NOT ms_data_raw-matnr IS INITIAL.
+      SELECT zprnum ferth INTO (mv_zprnum, lv_ferth) FROM mara UP TO 1 ROWS
+        WHERE matnr = ms_data_raw-matnr.
+        EXIT.
+      ENDSELECT.
+    ENDIF.
+
+    CLEAR ls_knmt.
+    knmt_read_single( EXPORTING iv_vkorg = ms_likp-vkorg iv_kunnr = ms_likp-kunnr iv_matnr = ms_data_raw-matnr iv_vtweg = mv_lips_vtweg IMPORTING es_knmt = ls_knmt ).
+    lv_postx_main = ls_knmt-postx.
+
+    CLEAR ls_knmt.
+    knmt_read_single( EXPORTING iv_vkorg = ms_likp-vkorg iv_kunnr = ms_likp-kunnr iv_matnr = ms_data_raw-vhilm iv_vtweg = mv_lips_vtweg IMPORTING es_knmt = ls_knmt ).
+    lv_postx_pack = ls_knmt-postx.
+
+
+
+*    *******************************
+    CLEAR ls_knmt.
+    knmt_read_single( EXPORTING iv_vkorg = ms_likp-vkorg iv_kunnr = ms_likp-kunnr iv_matnr = ms_data_raw-vhilm iv_vtweg = mv_lips_vtweg IMPORTING es_knmt = ls_knmt ).
+    lv_sortl = ls_knmt-sortl.
+
+*   ***********************************
+
+
+    IF lv_postx_pack IS INITIAL.
+      WRITE ms_data_raw-vhilm TO lv_postx_pack.
+    ENDIF.
+
+    CLEAR ls_ecust.
+    IF NOT ms_likp-kunnr IS INITIAL.
+      SELECT SINGLE * INTO ls_ecust FROM zecust01 WHERE kunnr = ms_likp-kunnr.
+    ENDIF.
+
+    ms_dp1-text01   = 'BMW Dingolfing Strohmeier Transport & Logistik'. " # EC TEXT
+    ms_dp1-text01_1 = 'DE 84152 Susskofen, Susskofen 6'.
+    ms_dp1-text02   = '21126/126/S'.
+    data_to_text_out ms_dp1-text03 ms_data_raw-vbeln.
+    ms_dp1-text04   = 'Gestamp Etem Automotive Bulgaria SA'.
+    data_to_text_out ms_dp1-text05 ms_data_raw-vemng.
+    data_to_text_out ms_dp1-text06 ms_data_raw-brgew.
+    ms_dp1-text07   = ms_data_raw-zhu.
+    ms_dp1-text08   = ms_data_raw-cust_pnum.
+    SHIFT ms_dp1-text08 LEFT DELETING LEADING '0'.
+    data_to_text_out ms_dp1-text09 ms_data_raw-pcs_ok.
+    ms_dp1-text10 = lv_postx_main.
+*    ms_dp1-text11 = lv_zprnum && ' - ( ' && ms_data_raw-zlength && ' mm )'.
+    ms_dp1-text11 = ms_data_raw-zlength. SHIFT ms_dp1-text11 LEFT DELETING LEADING space.
+    CONCATENATE mv_zprnum ' - (' ms_dp1-text11 ' mm)' INTO ms_dp1-text11 RESPECTING BLANKS.
+    ms_dp1-text11_1 = lv_postx_pack.
+    ms_dp1-text12 = ls_ecust-kunnr_ext1.
+    data_to_text_out ms_dp1-text13 ms_likp-wadat.
+    ms_dp1-text14 = lv_ferth.
+    ms_dp1-text15 = ms_data_raw-i_zcust_pack_no.
+    ms_dp1-text16 = ms_data_raw-lot.
+    form_text_fill( ).
+  ENDMETHOD.
+
+  METHOD delivery_info_get.
+    CLEAR ms_likp.
+    CLEAR mv_lips_vtweg.
+    IF NOT ms_data_raw-vbeln IS INITIAL.
+      SELECT * INTO ms_likp FROM likp UP TO 1 ROWS WHERE vbeln = ms_data_raw-vbeln.
+        EXIT.
+      ENDSELECT.
+
+      SELECT vtweg INTO mv_lips_vtweg FROM lips WHERE vbeln = ms_data_raw-vbeln AND matnr = ms_data_raw-matnr.
+        EXIT.
+      ENDSELECT.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD form_text_fill.
+    " Fill in text descriptions.
+    CLEAR ms_ftext1.
+    ms_ftext1-text01 = '(1) WARENMPANGER'.
+    ms_ftext1-text02 = '(2) ABLADESTELLE-REPORT-VERWENDUNGSSCHUSSEL'.
+    ms_ftext1-text03 = '(3) LIEFRERSCHEIN-NR.(N)'.
+    ms_ftext1-text04 = '(4) LIEFERANTENANSCHRIFT (KURZNAME, WERK, PLZ, ORT)'.
+    ms_ftext1-text05 = '(5) GEWCHT NETO'.
+    ms_ftext1-text06 = '(6) GEWCHT BRUTTO'.
+    ms_ftext1-text07 = '(7) ANZAHL PACK.'.
+    ms_ftext1-text08 = '(8) SACH-NR.KUNDE/AI(P)'.
+    ms_ftext1-text09 = '(9) FULLMENGE(Q)'.
+    ms_ftext1-text10 = '(10) BEZEICHNING LIEFERUNG LEISTUNG'.
+    ms_ftext1-text11 = '(11.1) SACH-NR. LIEFERANT'.
+    ms_ftext1-text11_1 = '(11.2) PM-IDENT-NR.'.
+    ms_ftext1-text12 = '(12) LIEFERANTEN-NR.(V)'.
+    ms_ftext1-text13 = '(13) DATUM'.
+    ms_ftext1-text14 = '(14) ANDERUNGSTAND KONSTRUCTION'.
+    ms_ftext1-text15 = '(15) PACKSTUCKNR.(S)'.
+    ms_ftext1-text16 = '(16) CHARGEN-NR(H)'.
+  ENDMETHOD.
+ENDCLASS.
+
+* Supplies print data for general printing of HU.
+* Print data are copied from Schenker.
+* Some fields are modified.
+CLASS lcl_print_data_loader02 DEFINITION INHERITING FROM lcl_print_data_loader01.
+  PROTECTED SECTION.
+    DATA: mv_kunnr_ship TYPE kunnr.
+    DATA: mv_vbeln_so TYPE vbak-vbeln.
+    DATA: mv_posnr_so TYPE vbap-posnr.
+    METHODS: data_fill REDEFINITION.
+    CLASS-METHODS: kna1_single_read IMPORTING iv_kunnr TYPE kunnr EXPORTING es_kna1 TYPE kna1.
+ENDCLASS.
+
+CLASS lcl_print_data_loader02 IMPLEMENTATION.
+  METHOD data_fill.
+
+
+    DATA: lv_kunnr_sold TYPE kunnr.
+
+    DATA: ls_kna1 TYPE kna1.
+    DATA: lv_t1 TYPE c LENGTH 50.
+*    DATA: ls_knmt TYPE knmt.
+    DATA: lv_length TYPE afpo-zz_length.
+    DATA: ls_vbap TYPE vbap.
+
+    " Load data for Schenker.
+    super->data_fill( ).
+
+    CLEAR: ms_dp1-text01, ms_dp1-text01_1, ms_dp1-text02, ms_dp1-text02_1, ms_dp1-text03, ms_dp1-text08,
+    ms_dp1-text11.
+
+
+
+    " Get sales order nr.
+    CLEAR: mv_vbeln_so, mv_posnr_so.
+    IF NOT ms_data_raw-vbeln IS INITIAL.
+      lcl_api01=>so_get_by_delivery( EXPORTING iv_vbeln = ms_data_raw-vbeln iv_posnr = ms_data_raw-posnr IMPORTING ev_vbeln = mv_vbeln_so ev_posnr = mv_posnr_so ).
+    ENDIF.
+
+    " Get sales order partners.
+    CLEAR: lv_kunnr_sold.
+    CLEAR: mv_kunnr_ship.
+    IF NOT mv_vbeln_so IS INITIAL.
+      lcl_api01=>so_partner_get( EXPORTING iv_vbeln = mv_vbeln_so iv_parvw = 'AG' IMPORTING ev_kunnr = lv_kunnr_sold ).
+      lcl_api01=>so_partner_get( EXPORTING iv_vbeln = mv_vbeln_so iv_parvw = 'WE' IMPORTING ev_kunnr = mv_kunnr_ship ).
+    ENDIF.
+
+    " Get data for sales order item.
+    CLEAR ls_vbap.
+    IF NOT mv_vbeln_so IS INITIAL AND NOT mv_posnr_so IS INITIAL.
+      SELECT SINGLE kdmat INTO ls_vbap-kdmat FROM vbap WHERE vbeln = mv_vbeln_so AND posnr = mv_posnr_so.
+      IF sy-subrc = 0.
+        " Restrict text to 15 symbols - text is printed with bigger font and barcode is printed with it.
+        ms_dp1-text08 = ls_vbap-kdmat.
+        SHIFT ms_dp1-text08 LEFT DELETING LEADING space.
+        IF strlen( ms_dp1-text08 ) > 15.
+          ms_dp1-text08 = ms_dp1-text08(30).
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    IF NOT lv_kunnr_sold IS INITIAL.
+      kna1_single_read( EXPORTING iv_kunnr = lv_kunnr_sold IMPORTING es_kna1 = ls_kna1 ).
+      CONCATENATE ls_kna1-name1 ls_kna1-name2 INTO ms_dp1-text01 SEPARATED BY space.
+      CONCATENATE ls_kna1-stras ls_kna1-ort01 ls_kna1-pstlz INTO ms_dp1-text01_1 SEPARATED BY ','.
+    ENDIF.
+
+    IF NOT mv_kunnr_ship IS INITIAL.
+      kna1_single_read( EXPORTING iv_kunnr = mv_kunnr_ship IMPORTING es_kna1 = ls_kna1 ).
+      CONCATENATE ls_kna1-name1 ls_kna1-name2 INTO ms_dp1-text02 SEPARATED BY space.
+      CONCATENATE ls_kna1-stras ls_kna1-ort01 ls_kna1-pstlz INTO ms_dp1-text02_1 SEPARATED BY ','.
+    ENDIF.
+
+    " Display delivery or sales order document.
+    CLEAR ms_dp1-text03.
+    CASE mv_p2.
+      WHEN c_doc_print_dlv.
+        data_to_text_out ms_dp1-text03 ms_data_raw-vbeln.
+      WHEN c_doc_print_so.
+        data_to_text_out ms_dp1-text03 mv_vbeln_so.
+      WHEN OTHERS.
+    ENDCASE.
+
+*    CLEAR ls_knmt.
+*    knmt_read_single( EXPORTING iv_vkorg = ms_likp-vkorg iv_kunnr = lv_kunnr_sold iv_matnr = ms_data_raw-matnr iv_vtweg = mv_lips_vtweg IMPORTING es_knmt = ls_knmt ).
+*    ms_dp1-text08 = ls_knmt-kdmat.
+
+    CLEAR lv_t1.
+    CALL FUNCTION 'CONVERSION_EXIT_MATN1_OUTPUT'
+      EXPORTING
+        input  = ms_data_raw-matnr
+      IMPORTING
+        output = lv_t1.
+    ms_dp1-text11 = |{ lv_t1 }| & | - | & |{ mv_zprnum }|.
+
+    " Get detail length in m. FM CALL FUNCTION 'ZORDER_CHAR' could be used
+    CLEAR lv_length.
+    IF NOT ms_data_raw-aufnr IS INITIAL.
+      SELECT zz_length INTO lv_length FROM afpo UP TO 1 ROWS
+        WHERE aufnr = ms_data_raw-aufnr.
+        EXIT.
+      ENDSELECT.
+    ENDIF.
+    lv_t1 = lv_length * 1000. " convert to mm
+    SHIFT lv_t1 LEFT DELETING LEADING space.
+    ms_dp1-text11 = |{ ms_dp1-text11 }| & | - (| & |{ lv_t1 }| & | mm)| .
+
+    form_text_fill( ).
+
+  ENDMETHOD.
+
+  METHOD kna1_single_read.
+    CLEAR es_kna1.
+
+    CALL FUNCTION 'KNA1_SINGLE_READ'
+      EXPORTING
+*       KZRFB         = ' '
+        kna1_kunnr    = iv_kunnr
+*       CVP_BEHAVIOR  =
+      IMPORTING
+        wkna1         = es_kna1
+      EXCEPTIONS
+        not_found     = 1
+        kunnr_blocked = 2
+        OTHERS        = 3.
+    IF sy-subrc <> 0.
+* Implement suitable error handling here
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.
+
+* Supplies print data for general printing of HU.
+* English texts.
+CLASS lcl_print_data_loader03 DEFINITION INHERITING FROM lcl_print_data_loader02.
+  PROTECTED SECTION.
+    METHODS: data_fill REDEFINITION.
+    METHODS: form_text_fill REDEFINITION.
+ENDCLASS.
+
+CLASS lcl_print_data_loader03 IMPLEMENTATION.
+  METHOD data_fill.
+    DATA: lv_t1 TYPE c LENGTH 50.
+    DATA: lv_hu_count TYPE i.
+
+    super->data_fill( ).
+    CLEAR: ms_dp1-text04, ms_dp1-text07, ms_dp1-text11, ms_dp1-text11_1, ms_dp1-text15.
+
+    ms_dp1-text04 = '119A Ilienci Blvd. Sofia 1220 Bulgaria'.
+    lcl_api01=>get_hu_count( EXPORTING iv_matnr = ms_data_raw-matnr_vepo iv_vbeln = ms_data_raw-vbeln IMPORTING ev_hu_count = lv_hu_count ).
+    ms_dp1-text07 = lv_hu_count.
+
+    CLEAR lv_t1.
+    CALL FUNCTION 'CONVERSION_EXIT_MATN1_OUTPUT'
+      EXPORTING
+        input  = ms_data_raw-matnr
+      IMPORTING
+        output = lv_t1.
+    ms_dp1-text11 = lv_t1.
+    ms_dp1-text11_1 = ms_dp1-text11.
+    ms_dp1-text15   = ms_data_raw-zhu.
+    IF strlen( ms_dp1-text15 ) > 1 AND ms_dp1-text15(1) = 'S'.
+      ms_dp1-text15 = ms_dp1-text15+1(*).
+    ENDIF.
+    form_text_fill( ).
+  ENDMETHOD.
+
+  METHOD form_text_fill.
+    " Fill in text descriptions.
+    CLEAR ms_ftext1.
+    ms_ftext1-text01 = '(1) Receiver'.
+    ms_ftext1-text02 = '(2) Dock - Gate'.
+    ms_ftext1-text03 = '(3) Advice note No (N)'.
+    ms_ftext1-text04 = '(4) Supplier Address'.
+    ms_ftext1-text05 = '(5) Net weight'..
+    ms_ftext1-text06 = '(6) Gross weight'.
+    ms_ftext1-text07 = '(7) No Boxes'.
+    ms_ftext1-text08 = '(8) Part No (P)'.
+    ms_ftext1-text09 = '(9) Quantity(Q)'.
+    ms_ftext1-text10 = '(10) Description'.
+    ms_ftext1-text11 = '(11.1) Supplier Part No(30S)'.
+    ms_ftext1-text11_1 = ''.
+    ms_ftext1-text12 = '(12) Supplair (V)'.
+    ms_ftext1-text13 = '(13) Date (D)'.
+    ms_ftext1-text14 = '(14) Eng. Change'.
+    ms_ftext1-text15 = '(15) Serial No (S)'.
+    ms_ftext1-text16 = '(16) Batch No (H)'.
+  ENDMETHOD.
+
+
+ENDCLASS.
+
+* Supplies print data for BMW labels.
+* Print data are copied from 02.
+* Some fields are modified.
+CLASS lcl_print_data_loader04 DEFINITION INHERITING FROM lcl_print_data_loader02.
+
+
+
+  PROTECTED SECTION.
+    METHODS: data_fill REDEFINITION.
+     DATA: mv_matnr TYPE knmt-matnr.
+     DATA: mv_vtweg TYPE knmt-vtweg.
+     DATA: mv_vkorg TYPE knmt-vkorg.
+     DATA: mv_kunnr TYPE knmt-kunnr.
+
+ENDCLASS.
+
+CLASS lcl_print_data_loader04 IMPLEMENTATION.
+  METHOD data_fill.
+    DATA: lv_hu_count TYPE i.
+    DATA: ls_vbpa TYPE vbpa.
+    DATA: ls_mv10a TYPE  mv10a.
+    DATA: ls_knmt TYPE knmt.
+    DATA: lv_sortl TYPE knmt-sortl.
+*    data: sortl TYPE mv10a-sortl.
+*
+*    DATA: iv_matnr TYPE matnr.
+*    DATA: iv_vtweg TYPE vtweg.
+*    DATA: iv_vkorg TYPE vkorg.
+*    DATA: iv_kunnr TYPE kunnr.
+
+
+
+
+    super->data_fill( ).
+
+
+    CLEAR:  ms_dp1-text07, ms_dp1-text15,  ms_dp1-text02.
+*    ms_dp1-text11
+
+    ms_dp1-text01_1 = ms_dp1-text02_1.
+
+    CLEAR: ms_dp1-text02_1.
+
+
+
+
+    lcl_api01=>so_partner_get( EXPORTING iv_vbeln = mv_vbeln_so iv_parvw = 'WE' IMPORTING es_vbpa = ls_vbpa ).
+*    lcl_api01=>so_partner_get( EXPORTING iv_vbeln = mv_vbeln_so iv_parvw = 'WE' IMPORTING es_knmt = ls_knmt ).
+    lcl_api01=>so_partner_get( EXPORTING iv_vbeln = mv_vbeln_so iv_parvw = 'WE' IMPORTING es_mv10a = ls_mv10a ).
+
+
+    knmt_read_single( EXPORTING iv_vkorg = ms_likp-vkorg iv_kunnr = ms_likp-kunnr iv_matnr = ms_data_raw-matnr iv_vtweg = mv_lips_vtweg IMPORTING es_knmt = ls_knmt ).
+    lv_sortl = ls_knmt-postx.
+
+    ms_dp1-text02 = ls_vbpa-ablad && '/' && ls_knmt-sortl.
+
+*
+*    IF strlen( ms_dp1-text08 ) > 0.
+*      ms_dp1-text08 = ms_dp1-text08+10(*).
+*    ENDIF.
+
+*
+*    SELECT SINGLE sortl INTO lv_sortl FROM knmt
+*      WHERE vkorg = iv_vkorg.
+**       AND vtweg = iv_vtweg AND matnr = iv_matnr AND kunnr = iv_kunnr.
+
+
+*    SELECT sortl FROM mv10a INTO ls_vbpa.
+*    ms_dp1-text02 = ls_vbpa-ablad.
+
+*     '/' && MV10A-SORTL.
+*     ms_dp1-text02 = '21272/162/S'.
+*    ms_dp1-text02 = sortl.
+
+      IF strlen( ms_dp1-text08 ) > 15.
+          ms_dp1-text08 = ms_dp1-text08(30).
+        ENDIF.
+
+
+    lcl_api01=>get_hu_count( EXPORTING iv_matnr = ms_data_raw-matnr_vepo iv_vbeln = ms_data_raw-vbeln IMPORTING ev_hu_count = lv_hu_count ).
+    ms_dp1-text07 = lv_hu_count.
+
+    ms_dp1-text15   = ms_data_raw-zhu.
+    IF strlen( ms_dp1-text15 ) > 1 AND ms_dp1-text15(1) = 'S'.
+      ms_dp1-text15 = ms_dp1-text15+1(*).
+    ENDIF.
+
+    form_text_fill( ).
+
+
+*    ms_dp1-text07 = ms_dp1-text07 + 1.
+
+
+  ENDMETHOD.
+ENDCLASS.
+
+CLASS lcl_print_data_loader05 DEFINITION INHERITING FROM lcl_print_data_loader02.
+
+  PROTECTED SECTION.
+    METHODS: data_fill REDEFINITION.
+ENDCLASS.
+
+CLASS lcl_print_data_loader05 IMPLEMENTATION.
+  METHOD data_fill.
+    DATA: lv_hu_count TYPE i.
+    DATA: ls_vbpa TYPE vbpa.
+    DATA: ls_mv10a TYPE  mv10a.
+     DATA: ls_knmt TYPE knmt.
+    DATA: lv_sortl TYPE knmt-sortl.
+*    data: sortl TYPE mv10a-sortl.
+
+    super->data_fill( ).
+
+    CLEAR:  ms_dp1-text07, ms_dp1-text15,  ms_dp1-text02, ms_dp1-text04, ms_dp1-text05.
+*    ms_dp1-text11
+
+    ms_dp1-text01_1 = ms_dp1-text02_1.
+
+    CLEAR: ms_dp1-text02_1.
+
+
+
+
+    lcl_api01=>so_partner_get( EXPORTING iv_vbeln = mv_vbeln_so iv_parvw = 'WE' IMPORTING es_vbpa = ls_vbpa ).
+    lcl_api01=>so_partner_get( EXPORTING iv_vbeln = mv_vbeln_so iv_parvw = 'WE' IMPORTING es_mv10a = ls_mv10a ).
+
+
+     knmt_read_single( EXPORTING iv_vkorg = ms_likp-vkorg iv_kunnr = ms_likp-kunnr iv_matnr = ms_data_raw-matnr iv_vtweg = mv_lips_vtweg IMPORTING es_knmt = ls_knmt ).
+    lv_sortl = ls_knmt-postx.
+
+    ms_dp1-text02 = ls_vbpa-ablad && '/' && ls_knmt-sortl.
+*    SELECT sortl FROM mv10a INTO ls_vbpa.
+*    ms_dp1-text02 = ls_vbpa-ablad && '/162/S'.
+*     '/' && MV10A-SORTL.
+*     ms_dp1-text02 = '21272/162/S'.
+*    ms_dp1-text02 = sortl.
+
+
+    lcl_api01=>get_hu_count( EXPORTING iv_matnr = ms_data_raw-matnr_vepo iv_vbeln = ms_data_raw-vbeln IMPORTING ev_hu_count = lv_hu_count ).
+    ms_dp1-text07 = lv_hu_count.
+
+    ms_dp1-text15   = ms_data_raw-zhu.
+    IF strlen( ms_dp1-text15 ) > 1 AND ms_dp1-text15(1) = 'S'.
+      ms_dp1-text15 = ms_dp1-text15+1(*).
+    ENDIF.
+
+    form_text_fill( ).
+
+
+
+  ENDMETHOD.
+ENDCLASS.
+
+FORM do_print_m2 USING it_data_p TYPE tt_data_print is_data_t TYPE st_dpetxt is_config TYPE zpack_auto01_c1.
+
+
+  DATA: lv_sfname TYPE tdsfname.
+  DATA: lv_fname TYPE rs38l_fnam.
+
+  lv_sfname = 'ZPACK_AUTO01_SFORM'.
+  CALL FUNCTION 'SSF_FUNCTION_MODULE_NAME'
+    EXPORTING
+      formname           = lv_sfname
+*     VARIANT            = ' '
+*     DIRECT_CALL        = ' '
+    IMPORTING
+      fm_name            = lv_fname
+    EXCEPTIONS
+      no_form            = 1
+      no_function_module = 2
+      OTHERS             = 3.
+  IF sy-subrc <> 0.
+    WRITE:/ 'Print form can not be found' COLOR COL_NEGATIVE, lv_sfname.
+    RETURN.
+  ENDIF.
+
+  CALL FUNCTION lv_fname
+    EXPORTING
+*     ARCHIVE_INDEX    =
+*     ARCHIVE_INDEX_TAB          =
+*     ARCHIVE_PARAMETERS         =
+*     CONTROL_PARAMETERS         =
+*     MAIL_APPL_OBJ    =
+*     MAIL_RECIPIENT   =
+*     MAIL_SENDER      =
+*     OUTPUT_OPTIONS   =
+      user_settings    = 'X'
+      is_text          = is_data_t
+      it_data          = it_data_p
+      is_pconfig       = is_config
+*   IMPORTING
+*     DOCUMENT_OUTPUT_INFO       =
+*     JOB_OUTPUT_INFO  =
+*     JOB_OUTPUT_OPTIONS         =
+    EXCEPTIONS
+      formatting_error = 1
+      internal_error   = 2
+      send_error       = 3
+      user_canceled    = 4
+      OTHERS           = 5.
+  IF sy-subrc <> 0.
+    IF sy-subrc = 4.
+      WRITE:/ 'User cancellation'.
+    ELSE.
+      WRITE:/ 'Print error. Error code:', sy-subrc.
+      DATA: lt_err TYPE tsferror.
+      DATA: lv_dummy TYPE string.
+      CALL FUNCTION 'SSF_READ_ERRORS'
+        IMPORTING
+          errortab = lt_err.
+      LOOP AT lt_err ASSIGNING FIELD-SYMBOL(<ls_err>).
+        MESSAGE ID <ls_err>-msgid TYPE <ls_err>-msgty NUMBER <ls_err>-msgno
+                WITH <ls_err>-msgv1 <ls_err>-msgv2 <ls_err>-msgv3 <ls_err>-msgv4 INTO lv_dummy.
+        WRITE:/ lv_dummy.
+      ENDLOOP.
+    ENDIF.
+    RETURN.
+  ENDIF.
+
+
+
+  ENDFORM.
+
+
+
+
+* Printing records from it_data_p.
+* Text descriptions are the same for all records - in is_data_t.
+FORM do_print_m1 USING it_data_p TYPE tt_data_print is_data_t TYPE st_dpetxt is_config TYPE zpack_auto01_c1.
+
+  DATA: lv_sfname TYPE tdsfname.
+  DATA: lv_fname TYPE rs38l_fnam.
+
+  lv_sfname = 'ZPACK_AUTO01_TEMP2'.
+  CALL FUNCTION 'SSF_FUNCTION_MODULE_NAME'
+    EXPORTING
+      formname           = lv_sfname
+*     VARIANT            = ' '
+*     DIRECT_CALL        = ' '
+    IMPORTING
+      fm_name            = lv_fname
+    EXCEPTIONS
+      no_form            = 1
+      no_function_module = 2
+      OTHERS             = 3.
+  IF sy-subrc <> 0.
+    WRITE:/ 'Print form can not be found' COLOR COL_NEGATIVE, lv_sfname.
+    RETURN.
+  ENDIF.
+
+
+  CALL FUNCTION lv_fname
+    EXPORTING
+*     ARCHIVE_INDEX    =
+*     ARCHIVE_INDEX_TAB          =
+*     ARCHIVE_PARAMETERS         =
+*     CONTROL_PARAMETERS         =
+*     MAIL_APPL_OBJ    =
+*     MAIL_RECIPIENT   =
+*     MAIL_SENDER      =
+*     OUTPUT_OPTIONS   =
+      user_settings    = 'X'
+      is_text          = is_data_t
+      it_data          = it_data_p
+      is_pconfig       = is_config
+*   IMPORTING
+*     DOCUMENT_OUTPUT_INFO       =
+*     JOB_OUTPUT_INFO  =
+*     JOB_OUTPUT_OPTIONS         =
+    EXCEPTIONS
+      formatting_error = 1
+      internal_error   = 2
+      send_error       = 3
+      user_canceled    = 4
+      OTHERS           = 5.
+  IF sy-subrc <> 0.
+    IF sy-subrc = 4.
+      WRITE:/ 'User cancellation'.
+    ELSE.
+      WRITE:/ 'Print error. Error code:', sy-subrc.
+      DATA: lt_err TYPE tsferror.
+      DATA: lv_dummy TYPE string.
+      CALL FUNCTION 'SSF_READ_ERRORS'
+        IMPORTING
+          errortab = lt_err.
+      LOOP AT lt_err ASSIGNING FIELD-SYMBOL(<ls_err>).
+        MESSAGE ID <ls_err>-msgid TYPE <ls_err>-msgty NUMBER <ls_err>-msgno
+                WITH <ls_err>-msgv1 <ls_err>-msgv2 <ls_err>-msgv3 <ls_err>-msgv4 INTO lv_dummy.
+        WRITE:/ lv_dummy.
+      ENDLOOP.
+    ENDIF.
+    RETURN.
+  ENDIF.
+ENDFORM.
+
+* Display data for the label on the screen table.
+* Table columns have the same names as the columns in the printed labels.
+FORM do_output_to_screen USING it_data_p TYPE tt_data_print is_data_t TYPE st_dpetxt.
+  DATA: lr_columns TYPE REF TO cl_salv_columns_table,
+        lr_column  TYPE REF TO cl_salv_column_table.
+  DATA: lt_col TYPE salv_t_column_ref.
+  DATA: ls_col LIKE LINE OF lt_col.
+  FIELD-SYMBOLS: <lv_val> TYPE any.
+  DATA: lo_eref TYPE REF TO cx_root.
+  DATA: ls_ins LIKE LINE OF gt_item_scr.
+
+  gt_item_scr = it_data_p.
+
+  IF NOT go_alv IS BOUND.
+    TRY.
+        CALL METHOD cl_salv_table=>factory
+          EXPORTING
+            list_display = if_salv_c_bool_sap=>false
+*           r_container  =
+*           container_name =
+          IMPORTING
+            r_salv_table = go_alv
+          CHANGING
+            t_table      = gt_item_scr.
+      CATCH cx_salv_msg INTO lo_eref.
+        MESSAGE lo_eref TYPE 'I'.
+        WRITE:/ 'Error output data' COLOR COL_NEGATIVE.
+        RETURN.
+    ENDTRY.
+
+    DATA: lr_functions TYPE REF TO cl_salv_functions_list.
+
+    lr_functions = go_alv->get_functions( ).
+    lr_functions->set_all( 'X' ).
+
+    lr_columns = go_alv->get_columns( ).
+    lr_columns->set_optimize( 'X' ).
+
+    DATA: lv_ts TYPE scrtext_s,
+          lv_tm TYPE scrtext_m,
+          lv_tl TYPE scrtext_l.
+
+    "Set columns description in table using values in is_data_t.
+    lt_col = lr_columns->get( ).
+    LOOP AT lt_col INTO ls_col.
+      TRY.
+          UNASSIGN <lv_val>.
+          ASSIGN COMPONENT ls_col-columnname OF STRUCTURE is_data_t TO <lv_val>.
+          IF NOT <lv_val> IS ASSIGNED.
+            CONTINUE.
+          ENDIF.
+
+          lv_ts = lv_tm = lv_tl = <lv_val>.
+          CLEAR lr_column.
+          lr_column ?= lr_columns->get_column( ls_col-columnname ).
+          CHECK lr_column IS BOUND.
+          lr_column->set_short_text( lv_ts ).
+          lr_column->set_medium_text( lv_tm ).
+          lr_column->set_long_text( lv_tl ).
+        CATCH cx_salv_not_found.                        "#EC NO_HANDLER
+          CONTINUE.
+      ENDTRY.
+    ENDLOOP.
+
+    go_alv->display( ).
+  ENDIF.
+ENDFORM.
+
+FORM start.
+  DATA: lo_reader TYPE REF TO lcl_data_reader.
+  DATA: lt_vstel TYPE RANGE OF vekp-vstel.
+  DATA: ls_vstel LIKE LINE OF lt_vstel.
+
+  CLEAR lt_vstel.
+  IF NOT p_vstel IS INITIAL.
+    CLEAR ls_vstel. ls_vstel-sign = 'I'. ls_vstel-option = 'EQ'. ls_vstel-low = p_vstel.
+    APPEND ls_vstel TO lt_vstel.
+  ENDIF.
+
+
+  " Data selection and summarization.
+  CREATE OBJECT lo_reader.
+  lo_reader->input_set(
+    EXPORTING
+      it_cpno  = so_cpno[]
+      it_exidv = so_exidv[]
+      it_vstel = lt_vstel[]
+      it_vbeln =  so_vbeln[] ).
+  lo_reader->do( ).
+
+  IF lo_reader->mt_data IS INITIAL.
+    MESSAGE i829(63).
+*   No data found
+    RETURN.
+  ENDIF.
+
+  DATA: lo_pdl TYPE REF TO lcl_print_data_loader.
+  DATA: lv_p1 TYPE lcl_print_data_loader01=>ty_flag_p1.
+  DATA: lv_p2 TYPE lcl_print_data_loader01=>ty_flag_p2.
+  DATA: lt_data_p TYPE tt_data_print.
+  DATA: ls_data_p LIKE LINE OF lt_data_p.
+  DATA: ls_data_t TYPE st_dpetxt.
+
+  CLEAR lo_pdl.
+
+  " Creates object for print data loading.
+  CLEAR lv_p1.
+
+  " Determine value of lv_p2 - printing sales order or delivery.
+  CLEAR lv_p2.
+  CASE 'X'.
+    WHEN p_pr02 OR p_pr03 OR p_pr04 OR p_pr05.
+      CASE 'X'.
+        WHEN p_prd1.
+          lv_p2 = lcl_print_data_loader01=>c_doc_print_dlv.
+        WHEN p_prd2.
+          lv_p2 = lcl_print_data_loader01=>c_doc_print_so.
+        WHEN OTHERS.
+      ENDCASE.
+  ENDCASE.
+
+  FIELD-SYMBOLS: <ls_prn_data> LIKE LINE OF lo_reader->mt_data.
+  DATA: ls_pconfig TYPE zpack_auto01_c1.
+
+
+  " Via structure ls_pconfig some changes in smartform are applied in order to
+  " print the proper layout for the 3 different form views.
+
+  " print_type01 = 1 or 2 - is used to differentiate text size for form field (2).
+  "         1 - used during Q printing - bigger size
+  "         2 - used during HU printing - smaller size
+  " print_type02 = 1 or 2 - used to differentiate appearance of text11 and text11_1 (11.1 and 11.2 on the print).
+  "         1 - text11 and text11_1 are texts with specified fonts
+  "         2 - text11 is text and text11_1 is barcode text with specified font.
+
+  " Collect data for printing.
+  CLEAR: lt_data_p, ls_data_t, ls_pconfig.
+  CASE 'X'.
+    WHEN p_pr01.
+      CREATE OBJECT lo_pdl TYPE lcl_print_data_loader01.
+      " Each item is printed 2 times on one page
+      CLEAR lt_data_p.
+      LOOP AT lo_reader->mt_data ASSIGNING <ls_prn_data>
+        WHERE NOT item_sum IS INITIAL.
+        lo_pdl->data_set( EXPORTING is_item = <ls_prn_data> iv_p2 = lv_p2 ).
+        lo_pdl->do( ).
+        lo_pdl->print_data_get( IMPORTING es_data = ls_data_p ).
+        lo_pdl->form_text_get( IMPORTING es_text = ls_data_t ).
+        " Add two records for each item.
+        APPEND ls_data_p TO lt_data_p.
+        APPEND ls_data_p TO lt_data_p.
+      ENDLOOP.
+      ls_pconfig-print_type01 = c_print_type1_q. " Q size
+      ls_pconfig-print_type02 = c_print_type2_1. " text11 & text11_1 - normal texts
+
+    WHEN p_pr02 OR p_pr04 OR p_pr05.
+      CASE 'X'.
+        WHEN p_pr02.
+          CREATE OBJECT lo_pdl TYPE lcl_print_data_loader02.
+        WHEN p_pr04.
+          CREATE OBJECT lo_pdl TYPE lcl_print_data_loader04.
+        WHEN p_pr05.
+          CREATE OBJECT lo_pdl TYPE lcl_print_data_loader05.
+      ENDCASE.
+
+      " Each item is printed once. On one page there are two different HUs.
+      " Items are sorted by Q and HU..
+      CLEAR lt_data_p.
+      LOOP AT lo_reader->mt_data USING KEY k1 ASSIGNING <ls_prn_data>.
+*        USING KEY k1
+*        WHERE not item_sum IS INITIAL.
+        CHECK <ls_prn_data>-item_sum IS INITIAL. " without summarized items
+        lo_pdl->data_set( EXPORTING is_item = <ls_prn_data> iv_p2 = lv_p2 ).
+        lo_pdl->do( ).
+        lo_pdl->print_data_get( IMPORTING es_data = ls_data_p ).
+        lo_pdl->form_text_get( IMPORTING es_text = ls_data_t ).
+
+        APPEND ls_data_p TO lt_data_p.
+*        APPEND ls_data_p TO lt_data_p.
+      ENDLOOP.
+      ls_pconfig-print_type01 = c_print_type1_hu1. " HU size
+      ls_pconfig-print_type02 = c_print_type2_1. " text11 & text11_1 - normal texts
+
+    WHEN p_pr03.
+      CREATE OBJECT lo_pdl TYPE lcl_print_data_loader03.
+
+      " Each item is printed once. On one page there are two different HUs.
+      " Items are sorted by Q and HU.
+      CLEAR lt_data_p.
+      LOOP AT lo_reader->mt_data USING KEY k1 ASSIGNING <ls_prn_data>.
+*        USING KEY k1
+*        WHERE item_sum IS INITIAL.
+        CHECK <ls_prn_data>-item_sum IS INITIAL. " without summarized items
+        lo_pdl->data_set( EXPORTING is_item = <ls_prn_data> iv_p2 = lv_p2 ).
+        lo_pdl->do( ).
+        lo_pdl->print_data_get( IMPORTING es_data = ls_data_p ).
+        lo_pdl->form_text_get( IMPORTING es_text = ls_data_t ).
+        APPEND ls_data_p TO lt_data_p.
+*        APPEND ls_data_p TO lt_data_p.
+      ENDLOOP.
+      ls_pconfig-print_type01 = c_print_type1_hu1. " HU size
+      ls_pconfig-print_type02 = c_print_type2_2. " text11 - text, text11_1 - barcode
+
+    WHEN OTHERS.
+      RETURN.
+  ENDCASE.
+
+
+
+
+  IF p_pr05 = 'X'.
+
+      PERFORM do_print_m2 USING lt_data_p ls_data_t ls_pconfig.
+     EXIT.
+
+    ENDIF.
+
+  IF p_oscr IS INITIAL.
+    PERFORM do_print_m1 USING lt_data_p ls_data_t ls_pconfig.
+
+
+  ELSE.
+    PERFORM do_output_to_screen USING lt_data_p ls_data_t.
+  ENDIF.
+
+
+
+
+ENDFORM.
+
+FORM layout_set.
+  DATA: lv_docsel_disp TYPE flag.
+  DATA: lv_b02x_disp   TYPE flag.
+  DATA: lv_b03x_disp   TYPE flag.
+
+  " Check wheter display of document selection is visible.
+  CLEAR lv_docsel_disp.
+  IF NOT p_pr02 IS INITIAL OR NOT p_pr03 IS INITIAL OR NOT p_pr04 IS INITIAL OR NOT p_pr05 IS INITIAL.
+    lv_docsel_disp = 'X'.
+  ENDIF.
+
+  LOOP AT SCREEN.
+    IF screen-group1 = 'B02'.
+      IF lv_docsel_disp IS INITIAL.
+        screen-invisible = '1'.
+      ELSE.
+        screen-invisible = '0'.
+      ENDIF.
+    ENDIF.
+    MODIFY SCREEN.
+  ENDLOOP.
+ENDFORM.
